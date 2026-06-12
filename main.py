@@ -20,7 +20,7 @@ from google.genai import types
 # ==================== CẤU HÌNH HỆ THỐNG ====================
 GEMINI_API_KEY = ""
 PDF_FOLDER_ID = ""
-
+MODEL_NAME = 'gemini-3.1-flash-lite'
 # KHÔNG CẦN FILE .XLSX NỮA - DÙNG ID FILE GOOGLE SHEETS GỐC CỦA BẠN
 SPREADSHEET_ID = ""
 SHEET_NAME = ""  # <--- CẤU HÌNH TÊN SHEET CON TẠI ĐÂY
@@ -189,7 +189,7 @@ def main():
             uploaded_file = gemini_client.files.upload(file=temp_pdf)
 
             response = gemini_client.models.generate_content(
-                model='gemini-3.1-flash-lite',
+                model=MODEL_NAME,
                 contents=[uploaded_file, PROMPT_JSON],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
