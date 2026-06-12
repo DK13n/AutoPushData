@@ -217,7 +217,7 @@ def main():
                 stt = current_total_rows - 1 if current_total_rows > 2 else 1
 
                 file_url = f"https://drive.google.com/file/d/{pdf_id}/view"
-                hyperlink_formula = f'=HYPERLINK("{file_url}", "{pdf_name}")'
+                hyperlink_formula = f'=HYPERLINK("{file_url}"; "{pdf_name}")'
 
                 row_to_append = [
                     stt,

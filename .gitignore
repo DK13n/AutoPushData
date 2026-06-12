@@ -1,5 +1,9 @@
 credentials.json
+
 .venv
+
 .env
+
 token.json
+
 temp*
