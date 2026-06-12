@@ -18,12 +18,14 @@ from google import genai
 from google.genai import types
 
 # ==================== CẤU HÌNH HỆ THỐNG ====================
-GEMINI_API_KEY = ""
-PDF_FOLDER_ID = ""
+GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"
+PDF_FOLDER_ID = "YOUR_PDF_FOLDER_ID"
+SPREADSHEET_ID = "YOUR_SPREADSHEET_ID"
+SHEET_NAME = "YOUR_SHEET_NAME"
+
 MODEL_NAME = 'gemini-3.1-flash-lite'
-# KHÔNG CẦN FILE .XLSX NỮA - DÙNG ID FILE GOOGLE SHEETS GỐC CỦA BẠN
-SPREADSHEET_ID = ""
-SHEET_NAME = ""  # <--- CẤU HÌNH TÊN SHEET CON TẠI ĐÂY
+MAX_RETRIES = 3  # <--- SỐ LẦN THỬ LẠI NGAY LẬP TỨC CHO FILE LỖI
+RETRY_DELAY = 5  # <--- SỐ GIÂY CHỜ GIỮA CÁC LẦN THỬ LẠI
 
 PROMPT_JSON = """
 Nhiệm vụ: Đọc tài liệu đính kèm, trích xuất và tóm tắt các thông tin cốt lõi. Trả về DUY NHẤT một object JSON hợp lệ (không kèm theo bất kỳ văn bản giải thích hay markdown code block nào).
@@ -114,25 +116,20 @@ def main():
         print(f"[LỖI] Không thể kết nối tới Google Sheet. Chi tiết: {e}")
         return
 
-    # 1. Đọc toàn bộ dữ liệu hiện tại trên Google Sheet để kiểm tra trùng lặp SONG SONG
     print("Đang quét Google Sheet để lập danh sách chống trùng lặp...")
     all_rows = sheet.get_all_values()
 
     processed_ids = set()
     processed_names = set()
 
-    # Quét dữ liệu từ dòng 3 trở đi
     for row in all_rows[2:]:
-        # Kiểm tra Cột B (index 1) - Tên văn bản hiển thị
         if len(row) >= 2 and row[1]:
             processed_names.add(str(row[1]).strip())
-        # Kiểm tra Cột Q (index 16) - ID gốc của file
         if len(row) >= 17 and row[16]:
             processed_ids.add(str(row[16]).strip())
 
     print(f"Hệ thống ghi nhận: {len(processed_names)} tên file và {len(processed_ids)} mã ID đã tồn tại trong bảng.")
 
-    # 2. Quét TOÀN BỘ file PDF trong thư mục trên Drive (Sử dụng vòng lặp kiểm tra Page Token)
     print("Đang quét toàn bộ thư mục Drive (đang lấy tất cả các trang file)...")
     all_available_pdfs = []
     page_token = None
@@ -142,7 +139,7 @@ def main():
         results = drive_service.files().list(
             q=query,
             fields="nextPageToken, files(id, name)",
-            pageSize=1000,  # Đặt cấu hình max 1000 file một trang để tải nhanh nhất
+            pageSize=1000,
             pageToken=page_token
         ).execute()
 
@@ -151,17 +148,14 @@ def main():
 
         page_token = results.get('nextPageToken')
         if not page_token:
-            break  # Hết trang thì dừng vòng lặp quét file
+            break
 
     print(f"Tổng số file PDF tìm thấy thực tế trong thư mục Drive: {len(all_available_pdfs)}")
 
-    # 3. Lọc danh sách file mới dựa trên cả TÊN và ID để không bị trùng
     new_pdfs = []
     for f in all_available_pdfs:
         f_id = f['id']
         f_name = f['name']
-
-        # Nếu cả Tên và ID đều chưa xuất hiện trong Sheet thì mới tính là file mới
         if f_id not in processed_ids and f_name not in processed_names:
             new_pdfs.append(f)
 
@@ -169,7 +163,6 @@ def main():
         print("Không phát hiện file PDF mới nào chưa được điền. Hệ thống dừng.")
         return
 
-    # 4. Sắp xếp các file mới lọc được theo số thứ tự trên tên file
     print("Đang tiến hành sắp xếp các file mới theo thứ tự văn bản...")
     new_pdfs.sort(key=extract_file_number)
 
@@ -177,75 +170,105 @@ def main():
     for f in new_pdfs:
         print(f"  - {f['name']}")
 
-    # 5. Vòng lặp xử lý chính thức
+    # 5. Vòng lặp xử lý chính thức (Đã nâng cấp cơ chế Retry ngay lập tức)
     for pdf in new_pdfs:
         pdf_id = pdf['id']
         pdf_name = pdf['name']
-        print(f"\n[Đang xử lý] -> {pdf_name}")
         temp_pdf = f"temp_{pdf_id}.pdf"
 
-        try:
-            download_file_from_drive(drive_service, pdf_id, temp_pdf)
-            uploaded_file = gemini_client.files.upload(file=temp_pdf)
+        success = False  # Biến đánh dấu trạng thái xử lý của file hiện tại
 
-            response = gemini_client.models.generate_content(
-                model=MODEL_NAME,
-                contents=[uploaded_file, PROMPT_JSON],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                )
-            )
+        # Vòng lặp thử lại cục bộ cho riêng file này
+        for attempt in range(1, MAX_RETRIES + 1):
+            uploaded_file = None
+            if attempt == 1:
+                print(f"\n[Đang xử lý] -> {pdf_name}")
+            else:
+                print(f"  [Thử lại lần {attempt}/{MAX_RETRIES}] Sau Lỗi Quy Trình...")
+                time.sleep(RETRY_DELAY)
 
             try:
-                data = json.loads(response.text)
-            except json.JSONDecodeError:
-                print("  [Lỗi] Gemini không trả về chuỗi JSON hợp lệ. Sẽ xử lý lại ở lượt sau.")
-                continue
+                # Chỉ tải file từ Drive về nếu file tạm chưa tồn tại cục bộ
+                if not os.path.exists(temp_pdf):
+                    download_file_from_drive(drive_service, pdf_id, temp_pdf)
 
-            # Tính toán số lượng STT dựa trên dòng thực tế
-            current_total_rows = len(sheet.get_all_values())
-            stt = current_total_rows - 1 if current_total_rows > 2 else 1
+                uploaded_file = gemini_client.files.upload(file=temp_pdf)
 
-            # Tạo công thức Hyperlink cho tên file
-            file_url = f"https://drive.google.com/file/d/{pdf_id}/view"
-            hyperlink_formula = f'=HYPERLINK("{file_url}", "{pdf_name}")'
+                response = gemini_client.models.generate_content(
+                    model=MODEL_NAME,
+                    contents=[uploaded_file, PROMPT_JSON],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                    )
+                )
 
-            # Chuẩn bị dòng dữ liệu
-            row_to_append = [
-                stt,  # A: STT
-                hyperlink_formula,  # B: Tên văn bản (Dạng Link)
-                format_cell_value(data.get('year_issued', '')),  # C: Year issued
-                format_cell_value(data.get('years_in_effect', '')),  # D: Years in effect
-                format_cell_value(data.get('policy', '')),  # E: Policy
-                format_cell_value(data.get('education_levels', '')),  # F: Education Levels
-                format_cell_value(data.get('key_words', '')),  # G: Key words/topics
-                format_cell_value(data.get('key_initiatives', '')),  # H: Key initiatives
-                format_cell_value(data.get('notes', '')),  # I: Notes
-                format_cell_value(data.get('vn_pdf', 1)),  # J: VN PDF
-                format_cell_value(data.get('en_pdf', 0)),  # K: EN PDF
-                format_cell_value(data.get('related_quality', 0)),  # L: Quality
-                format_cell_value(data.get('related_inequality', 0)),  # M: Inequality
-                format_cell_value(data.get('related_teacher_training', 0)),  # N: Teacher Training
-                format_cell_value(data.get('related_early_childhood', 0)),  # O: Early Childhood
-                format_cell_value(data.get('related_curriculum', 0)),  # P: Curriculum
-                pdf_id  # Q: ID chống trùng
-            ]
+                try:
+                    data = json.loads(response.text)
+                except json.JSONDecodeError:
+                    print("  [Lỗi] Gemini không trả về chuỗi JSON hợp lệ ở lượt này.")
+                    # Xóa file trên bộ nhớ tạm Gemini trước khi sang lượt retry kế tiếp
+                    if uploaded_file:
+                        gemini_client.files.delete(name=uploaded_file.name)
+                    continue  # Nhảy sang lần thử tiếp theo (attempt + 1)
 
-            # Đẩy lên Google Sheets
-            sheet.append_row(row_to_append, value_input_option='USER_ENTERED')
-            print(f"  [Thành công] Đã đồng bộ vào Google Sheets.")
+                current_total_rows = len(sheet.get_all_values())
+                stt = current_total_rows - 1 if current_total_rows > 2 else 1
 
-            # Xóa file trên bộ nhớ tạm Gemini
-            gemini_client.files.delete(name=uploaded_file.name)
-            time.sleep(2)  # Giảm tải cho Rate Limit
+                file_url = f"https://drive.google.com/file/d/{pdf_id}/view"
+                hyperlink_formula = f'=HYPERLINK("{file_url}", "{pdf_name}")'
 
-        except Exception as ex:
-            print(f"  [LỖI QUY TRÌNH] {ex}. File này sẽ được quét lại ở lần sau.")
-        finally:
-            if os.path.exists(temp_pdf):
-                os.remove(temp_pdf)
+                row_to_append = [
+                    stt,
+                    hyperlink_formula,
+                    format_cell_value(data.get('year_issued', '')),
+                    format_cell_value(data.get('years_in_effect', '')),
+                    format_cell_value(data.get('policy', '')),
+                    format_cell_value(data.get('education_levels', '')),
+                    format_cell_value(data.get('key_words', '')),
+                    format_cell_value(data.get('key_initiatives', '')),
+                    format_cell_value(data.get('notes', '')),
+                    format_cell_value(data.get('vn_pdf', 1)),
+                    format_cell_value(data.get('en_pdf', 0)),
+                    format_cell_value(data.get('related_quality', 0)),
+                    format_cell_value(data.get('related_inequality', 0)),
+                    format_cell_value(data.get('related_teacher_training', 0)),
+                    format_cell_value(data.get('related_early_childhood', 0)),
+                    format_cell_value(data.get('related_curriculum', 0)),
+                    pdf_id
+                ]
 
-    print("\n--- Hoàn tất! Toàn bộ danh sách file lớn đã được xử lý không trùng lặp ---")
+                sheet.append_row(row_to_append, value_input_option='USER_ENTERED')
+                print(f"  [Thành công] Đã đồng bộ vào Google Sheets.")
+
+                success = True
+                # Giải phóng tài nguyên tạm trên Gemini sau khi xong
+                gemini_client.files.delete(name=uploaded_file.name)
+                break  # Thoát khỏi vòng lặp thử lại vì đã thành công
+
+            except Exception as ex:
+                print(f"  [Lỗi Thao Tác lần {attempt}]: {ex}")
+            finally:
+                # Đảm bảo file được giải phóng trên Gemini nếu có lỗi xảy ra ở giữa tiến trình
+                if not success and uploaded_file:
+                    try:
+                        gemini_client.files.delete(name=uploaded_file.name)
+                    except:
+                        pass
+
+        # Dọn dẹp file PDF tạm lưu ở máy cục bộ sau khi kết thúc chuỗi thử lại của file đó
+        if os.path.exists(temp_pdf):
+            os.remove(temp_pdf)
+
+        # Nếu đã thử hết số lần cho phép (MAX_RETRIES) mà vẫn thất bại hoàn toàn
+        if not success:
+            print(
+                f"\n[DỪNG TIẾN TRÌNH THỰC THI] Đã thử liên tiếp {MAX_RETRIES} lần trên file '{pdf_name}' nhưng không thành công.")
+            print("Chương trình dừng lại tại đây để bảo toàn chính xác thứ tự dòng dữ liệu cuốn chiếu.")
+            break  # Thoát hẳn vòng lặp danh sách file PDF, không chạy các file phía sau
+
+        time.sleep(2)  # Giảm tải cho Rate Limit của các file tiếp theo
+
+    print("\n--- Tiến trình xử lý kết thúc ---")
 
 
 if __name__ == '__main__':
