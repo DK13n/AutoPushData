@@ -2,6 +2,7 @@ import os
 import io
 import json
 import time
+from dotenv import load_dotenv
 from datetime import datetime
 import re
 
@@ -17,13 +18,14 @@ import gspread  # Thư viện chuyên dụng cho Google Sheets
 from google import genai
 from google.genai import types
 
+load_dotenv()
 # ==================== CẤU HÌNH HỆ THỐNG ====================
-GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"
-PDF_FOLDER_ID = "YOUR_PDF_FOLDER_ID"
-SPREADSHEET_ID = "YOUR_SPREADSHEET_ID"
-SHEET_NAME = "YOUR_SHEET_NAME"
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+PDF_FOLDER_ID = os.getenv('PDF_FOLDER_ID')
+SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
+SHEET_NAME = os.getenv('SHEET_NAME')
+MODEL_NAME = os.getenv('MODEL_NAME')
 
-MODEL_NAME = 'gemini-3.1-flash-lite'
 MAX_RETRIES = 3  # <--- SỐ LẦN THỬ LẠI NGAY LẬP TỨC CHO FILE LỖI
 RETRY_DELAY = 5  # <--- SỐ GIÂY CHỜ GIỮA CÁC LẦN THỬ LẠI
 
